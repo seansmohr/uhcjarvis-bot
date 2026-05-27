@@ -335,7 +335,10 @@ def setup_session(mfa_fn) -> str:
                     "button:has-text('Continue'), button:has-text('Send'), "
                     "button[type='submit'], input[type='submit']"
                 ).first.click(timeout=8_000)
-                page.wait_for_load_state("networkidle", timeout=15_000)
+                try:
+                    page.wait_for_load_state("load", timeout=10_000)
+                except PlaywrightTimeoutError:
+                    pass
                 page.wait_for_timeout(1_500)
             except PlaywrightTimeoutError:
                 pass
@@ -370,11 +373,34 @@ def setup_session(mfa_fn) -> str:
                     "button:has-text('Continue'), button:has-text('Verify'), "
                     "button:has-text('Submit'), button[type='submit']"
                 ).first.click(timeout=10_000)
-                page.wait_for_load_state("networkidle", timeout=20_000)
+                # Use load not networkidle — some pages poll indefinitely
+                try:
+                    page.wait_for_load_state("load", timeout=15_000)
+                except PlaywrightTimeoutError:
+                    pass
+                page.wait_for_timeout(2_000)
+
+        # ── Handle "Trust this device?" / "Keep me signed in?" prompts ────────
+        trust_selectors = [
+            "button:has-text('Trust')",
+            "button:has-text('Yes, trust')",
+            "button:has-text('Keep me signed in')",
+            "button:has-text('Remember this device')",
+            "button:has-text('Yes')",
+        ]
+        for sel in trust_selectors:
+            try:
+                loc = page.locator(sel).first
+                loc.wait_for(state="visible", timeout=3_000)
+                loc.click()
+                page.wait_for_timeout(2_000)
+                break
+            except PlaywrightTimeoutError:
+                continue
 
         # ── Confirm we're back on Jarvis ───────────────────────────────────────
         try:
-            page.wait_for_url("*uhcjarvis.com*", timeout=15_000)
+            page.wait_for_url("*uhcjarvis.com*", timeout=20_000)
         except PlaywrightTimeoutError:
             pass
 
@@ -382,8 +408,8 @@ def setup_session(mfa_fn) -> str:
             context.close()
             browser.close()
             raise RuntimeError(
-                f"Login failed — still on SSO page ({page.url}). "
-                "If credentials are correct, the RBA challenge page layout may have changed."
+                f"Still on SSO after verification ({page.url}). "
+                "Visit /setup/screenshot to see what the browser is stuck on."
             )
 
         context.storage_state(path=str(SESSION_FILE))

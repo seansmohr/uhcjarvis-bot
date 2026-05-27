@@ -45,6 +45,7 @@ def _setup_job():
     def mfa_fn():
         _setup["status"] = "waiting_for_mfa"
         _mfa_event.wait(timeout=300)  # 5-minute window to enter the code
+        _setup["status"] = "completing"  # tell the UI the code was received
         return _mfa_code
 
     _setup.update({"status": "logging_in", "b64": None, "error": None})
