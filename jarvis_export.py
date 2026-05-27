@@ -163,7 +163,15 @@ def _send_email(filepath: Path = None, subject: str = None, body: str = None):
 
 
 def run_export() -> str:
-    """Run the full export. Returns path to downloaded file."""
+    """
+    Run the full export. Exact steps based on observed Jarvis UI:
+      1. Load dashboard, verify session still valid
+      2. Click "Book of Business" nav link
+      3. Clear any active filters (so the full book downloads, not a filtered subset)
+      4. Click the page-level Download button → modal opens
+      5. Click the Download button inside the modal → file downloads as .xlsx
+      6. Email the file
+    """
     _load_session()
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -172,7 +180,12 @@ def run_export() -> str:
         context = _stealth_context(browser, storage_state=str(SESSION_FILE), accept_downloads=True)
         page = context.new_page()
 
-        page.goto(LOGIN_URL, wait_until="networkidle", timeout=30_000)
+        # ── 1. Check session ───────────────────────────────────────────────────
+        try:
+            page.goto(LOGIN_URL, wait_until="load", timeout=30_000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(2_000)
 
         if not _is_logged_in(page):
             context.close()
@@ -180,33 +193,58 @@ def run_export() -> str:
             _send_email(
                 subject="Jarvis Export — Session Expired",
                 body=(
-                    "Your UHC Jarvis session has expired and the export could not run.\n\n"
-                    "To fix:\n"
-                    "1. Run seed_session.py on your local machine.\n"
-                    "2. Copy the JARVIS_SESSION_B64 value it prints.\n"
-                    "3. Update the JARVIS_SESSION_B64 variable in Railway and redeploy."
+                    "Your UHC Jarvis session has expired.\n\n"
+                    "Visit /setup on your Railway app to re-authenticate."
                 ),
             )
-            raise SessionExpiredError(
-                "Session expired. Visit /setup on your Railway app to re-authenticate."
-            )
+            raise SessionExpiredError("Session expired. Visit /setup to re-authenticate.")
 
-        if not _navigate_to_bob(page):
+        # ── 2. Navigate to Book of Business ───────────────────────────────────
+        try:
+            page.locator("a:has-text('Book of Business')").first.click(timeout=10_000)
+        except PlaywrightTimeoutError:
             context.close()
             browser.close()
-            raise RuntimeError(
-                "Could not navigate to Book of Business. The portal UI may have changed."
-            )
+            raise RuntimeError("'Book of Business' nav link not found.")
 
-        download = _trigger_download(page)
-        if not download:
+        try:
+            page.wait_for_load_state("load", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(2_000)
+
+        # ── 3. Clear filters so the full book is included in the download ──────
+        try:
+            page.locator(
+                "a:has-text('Clear All Filters'), button:has-text('Clear All Filters')"
+            ).first.click(timeout=5_000)
+            page.wait_for_timeout(1_000)
+        except PlaywrightTimeoutError:
+            pass  # no filters active, continue
+
+        # ── 4. Click the page-level Download button to open the modal ─────────
+        try:
+            page.locator("button:has-text('Download')").first.click(timeout=10_000)
+        except PlaywrightTimeoutError:
             context.close()
             browser.close()
-            raise RuntimeError(
-                "Could not trigger export. The export button may have changed."
-            )
+            raise RuntimeError("Download button not found on Book of Business page.")
 
-        name = download.suggested_filename or f"jarvis_bob_{int(time.time())}"
+        # Wait for the download modal to appear
+        try:
+            page.wait_for_selector("text=If you want to see your entire book", timeout=10_000)
+        except PlaywrightTimeoutError:
+            pass  # modal text may differ; proceed to click modal Download anyway
+
+        page.wait_for_timeout(500)
+
+        # ── 5. Click Download inside the modal ────────────────────────────────
+        # The modal's Download button is the last visible one on the page
+        with page.expect_download(timeout=120_000) as dl_info:
+            page.locator("button:has-text('Download')").last.click(timeout=10_000)
+
+        download = dl_info.value
+        name = download.suggested_filename or f"jarvis_bob_{int(time.time())}.xlsx"
         dest = DOWNLOAD_DIR / name
         download.save_as(dest)
         print(f"[export] Downloaded: {dest}")
@@ -214,6 +252,7 @@ def run_export() -> str:
         context.close()
         browser.close()
 
+    # ── 6. Email the file ──────────────────────────────────────────────────────
     _send_email(
         filepath=dest,
         subject=f"Jarvis Book of Business — {dest.name}",
