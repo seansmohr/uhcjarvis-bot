@@ -207,9 +207,9 @@ SETUP_HTML = """<!DOCTYPE html>
 
   <!-- Step: waiting for MFA -->
   <div class="step" id="step-mfa">
-    <span class="status-dot spin"></span>MFA code required
+    <span class="status-dot spin"></span>Verification code required
     <br><br>
-    <label for="mfa-input">Enter the code from your email or phone:</label>
+    <label for="mfa-input">Check your email or phone for a verification code and enter it below:</label>
     <input type="text" id="mfa-input" placeholder="123456" autocomplete="one-time-code" inputmode="numeric">
     <button id="btn-mfa" onclick="submitMfa()">Submit Code</button>
   </div>

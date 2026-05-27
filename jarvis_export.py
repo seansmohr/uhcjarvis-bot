@@ -303,36 +303,76 @@ def setup_session(mfa_fn) -> str:
             "button:has-text('Continue'), button[type='submit'], input[type='submit']"
         ).first.click(timeout=10_000)
         page.wait_for_load_state("networkidle", timeout=20_000)
+        page.wait_for_timeout(1_500)
 
-        # MFA detection
-        mfa_selectors = [
-            "input[name='otp']",
-            "input[name='code']",
-            "input[name='verificationCode']",
-            "input[placeholder*='code' i]",
-            "input[aria-label*='code' i]",
-        ]
-        mfa_field = None
-        for sel in mfa_selectors:
+        # ── RBA options page (#/rba/options) ───────────────────────────────────
+        # OneHealthcareID may show a "how do you want your code?" screen.
+        # Click the first available send-code option (email or phone), then
+        # fall through to the code-entry step below.
+        if "#/rba/options" in page.url or "/rba/" in page.url:
+            # Try clicking the first radio/button option (email, phone, etc.)
+            rba_option_selectors = [
+                "input[type='radio']",
+                "button:has-text('Email')",
+                "button:has-text('Phone')",
+                "button:has-text('Text')",
+                "li button",
+                "[class*='option'] button",
+                "[class*='option'] input",
+            ]
+            for sel in rba_option_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    loc.wait_for(state="visible", timeout=3_000)
+                    loc.click()
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+
+            # Click the Continue/Send button to dispatch the code
             try:
-                loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=5_000)
-                mfa_field = loc
-                break
+                page.locator(
+                    "button:has-text('Continue'), button:has-text('Send'), "
+                    "button[type='submit'], input[type='submit']"
+                ).first.click(timeout=8_000)
+                page.wait_for_load_state("networkidle", timeout=15_000)
+                page.wait_for_timeout(1_500)
             except PlaywrightTimeoutError:
-                continue
+                pass
 
-        if mfa_field:
-            code = mfa_fn()  # blocks until user submits via /setup/mfa
-            mfa_field.fill(str(code))
-            page.locator(
-                "button[type='submit'], button:has-text('Verify'), "
-                "button:has-text('Submit'), button:has-text('Continue')"
-            ).first.click(timeout=10_000)
-            page.wait_for_load_state("networkidle", timeout=20_000)
+        # ── Code entry step (#/rba/challenge or similar) ───────────────────────
+        # Covers both traditional MFA and RBA challenge pages.
+        if "onehealthcareid.com" in page.url and "uhcjarvis.com" not in page.url:
+            mfa_selectors = [
+                "input[type='text']",
+                "input[name='otp']",
+                "input[name='code']",
+                "input[name='verificationCode']",
+                "input[placeholder*='code' i]",
+                "input[aria-label*='code' i]",
+                "input[maxlength='6']",
+                "input[maxlength='8']",
+            ]
+            mfa_field = None
+            for sel in mfa_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    loc.wait_for(state="visible", timeout=5_000)
+                    mfa_field = loc
+                    break
+                except PlaywrightTimeoutError:
+                    continue
 
-        # After SSO login, expect a redirect back to uhcjarvis.com
-        # Wait up to 15s for the redirect to complete
+            if mfa_field:
+                code = mfa_fn()  # blocks until user submits via /setup/mfa
+                mfa_field.fill(str(code))
+                page.locator(
+                    "button:has-text('Continue'), button:has-text('Verify'), "
+                    "button:has-text('Submit'), button[type='submit']"
+                ).first.click(timeout=10_000)
+                page.wait_for_load_state("networkidle", timeout=20_000)
+
+        # ── Confirm we're back on Jarvis ───────────────────────────────────────
         try:
             page.wait_for_url("*uhcjarvis.com*", timeout=15_000)
         except PlaywrightTimeoutError:
@@ -343,7 +383,7 @@ def setup_session(mfa_fn) -> str:
             browser.close()
             raise RuntimeError(
                 f"Login failed — still on SSO page ({page.url}). "
-                "Check JARVIS_USERNAME and JARVIS_PASSWORD in Railway variables."
+                "If credentials are correct, the RBA challenge page layout may have changed."
             )
 
         context.storage_state(path=str(SESSION_FILE))
