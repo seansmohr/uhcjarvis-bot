@@ -21,6 +21,9 @@ SSO_URL = "https://identity.onehealthcareid.com/oneapp/index.html"
 SESSION_FILE = Path("/tmp/jarvis_session.json")
 DOWNLOAD_DIR = Path("/tmp/jarvis_downloads")
 
+# Stores the most recent debug screenshot bytes — served by /setup/debug
+debug_screenshot: bytes = None
+
 # Mimic a real Mac Chrome to avoid bot-detection on the SSO page
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -222,200 +225,144 @@ def run_export() -> str:
 
 def setup_session(mfa_fn) -> str:
     """
-    Establish a fresh session via headless login.
-    mfa_fn() is called when the MFA page is detected; it should block
-    until the user submits their code and return it as a string.
-    Returns the base64-encoded session string.
+    Establish a fresh Jarvis session. Exact login flow based on observed pages:
+      1. Jarvis sign-in page → click "Sign in with One Healthcare ID"
+      2. SSO: enter username → Continue
+      3. SSO: enter password → Continue
+      4. "Verify Your Identity" → click "Via Text Message"
+      5. "Access Code" → check "Skip this step" → wait for user OTP → Continue
+      6. Redirects back to uhcjarvis.com → save session
     """
     username = os.getenv("JARVIS_USERNAME")
     password = os.getenv("JARVIS_PASSWORD")
     if not username or not password:
         raise RuntimeError("JARVIS_USERNAME and JARVIS_PASSWORD must be set in Railway variables.")
 
+    def _wait_load(pg, timeout=12_000):
+        try:
+            pg.wait_for_load_state("load", timeout=timeout)
+        except PlaywrightTimeoutError:
+            pass
+        pg.wait_for_timeout(1_000)
+
+    def _snap():
+        import jarvis_export as _m
+        _m.debug_screenshot = page.screenshot(full_page=True)
+
     with sync_playwright() as p:
         browser = _stealth_browser(p)
         context = _stealth_context(browser)
         page = context.new_page()
 
-        # Step 1: load the Jarvis sign-in page
-        page.goto(JARVIS_SIGNIN_URL, wait_until="networkidle", timeout=30_000)
+        # ── 1. Jarvis sign-in page ─────────────────────────────────────────────
+        page.goto(JARVIS_SIGNIN_URL, wait_until="load", timeout=30_000)
         page.wait_for_timeout(2_000)
+        _snap()
 
-        # Step 2: click "Sign in with One Healthcare ID" — this initialises the
-        #         OAuth flow and redirects to the SSO page with proper state tokens
         try:
             page.locator(
                 "button:has-text('Sign in with One Healthcare ID'), "
                 "a:has-text('Sign in with One Healthcare ID')"
             ).first.click(timeout=10_000)
         except PlaywrightTimeoutError:
+            _snap()
             raise RuntimeError(
-                "Could not find the 'Sign in with One Healthcare ID' button on "
-                f"{JARVIS_SIGNIN_URL}. The page layout may have changed."
+                f"'Sign in with One Healthcare ID' button not found on {JARVIS_SIGNIN_URL}."
             )
 
-        # Step 3: wait to land on the SSO page (redirect may take a moment)
+        # ── 2. SSO page: username ──────────────────────────────────────────────
         try:
             page.wait_for_url("*onehealthcareid.com*", timeout=20_000)
         except PlaywrightTimeoutError:
-            pass  # already there — wait_for_url can fire late on SPA hash routes
-
+            pass
         if "onehealthcareid.com" not in page.url:
-            raise RuntimeError(
-                f"Did not reach OneHealthcareID after clicking sign-in. "
-                f"Currently at: {page.url}"
-            )
+            _snap()
+            raise RuntimeError(f"Did not reach SSO. Currently at: {page.url}")
 
-        page.wait_for_load_state("networkidle", timeout=15_000)
-
-        # ── Username step ──────────────────────────────────────────────────────
-        # OneHealthcareID uses a two-step flow:
-        #   1. Enter username / email → click Continue
-        #   2. Enter password → click Continue
         try:
             page.wait_for_selector("input", state="visible", timeout=15_000)
         except PlaywrightTimeoutError:
-            raise RuntimeError(
-                f"SSO page loaded but no input fields appeared. URL: {page.url}"
-            )
+            _snap()
+            raise RuntimeError(f"SSO loaded but no input appeared. URL: {page.url}")
 
-        # Fill the first visible text input (the "One Healthcare ID or Email Address" field)
-        username_field = page.locator("input:visible").first
-        username_field.fill(username)
+        page.wait_for_timeout(500)
+        _snap()
+        page.locator("input:visible").first.fill(username)
+        page.locator("button:has-text('Continue')").first.click(timeout=10_000)
+        _wait_load(page)
 
-        page.locator(
-            "button:has-text('Continue'), button[type='submit'], input[type='submit']"
-        ).first.click(timeout=10_000)
-        page.wait_for_load_state("networkidle", timeout=15_000)
-        page.wait_for_timeout(1_500)
-
-        # ── Password step ──────────────────────────────────────────────────────
+        # ── 3. SSO page: password ──────────────────────────────────────────────
         try:
-            page.wait_for_selector("input[type='password']", state="visible", timeout=10_000)
+            page.wait_for_selector("input[type='password']", state="visible", timeout=15_000)
         except PlaywrightTimeoutError:
+            _snap()
+            raise RuntimeError(f"Password field did not appear. URL: {page.url}")
+
+        _snap()
+        page.locator("input[type='password']").first.fill(password)
+        page.locator("button:has-text('Continue')").first.click(timeout=10_000)
+        _wait_load(page)
+
+        # ── 4. "Verify Your Identity" page: click "Via Text Message" ──────────
+        try:
+            page.wait_for_selector(
+                "button:has-text('Via Text Message'), button:has-text('Via Call')",
+                state="visible", timeout=15_000
+            )
+        except PlaywrightTimeoutError:
+            _snap()
             raise RuntimeError(
-                f"Password field did not appear after submitting username. URL: {page.url}"
+                f"'Verify Your Identity' page did not appear. URL: {page.url} — "
+                "check /setup/debug for a screenshot."
             )
 
-        page.locator("input[type='password']").first.fill(password)
+        _snap()
+        page.locator("button:has-text('Via Text Message')").first.click(timeout=10_000)
+        _wait_load(page)
 
-        page.locator(
-            "button:has-text('Continue'), button[type='submit'], input[type='submit']"
-        ).first.click(timeout=10_000)
-        page.wait_for_load_state("networkidle", timeout=20_000)
-        page.wait_for_timeout(1_500)
+        # ── 5. "Access Code" page: OTP entry ──────────────────────────────────
+        try:
+            page.wait_for_selector("input", state="visible", timeout=15_000)
+        except PlaywrightTimeoutError:
+            _snap()
+            raise RuntimeError(f"OTP input did not appear. URL: {page.url}")
 
-        # ── RBA options page (#/rba/options) ───────────────────────────────────
-        # OneHealthcareID may show a "how do you want your code?" screen.
-        # Click the first available send-code option (email or phone), then
-        # fall through to the code-entry step below.
-        if "#/rba/options" in page.url or "/rba/" in page.url:
-            # Try clicking the first radio/button option (email, phone, etc.)
-            rba_option_selectors = [
-                "input[type='radio']",
-                "button:has-text('Email')",
-                "button:has-text('Phone')",
-                "button:has-text('Text')",
-                "li button",
-                "[class*='option'] button",
-                "[class*='option'] input",
-            ]
-            for sel in rba_option_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    loc.wait_for(state="visible", timeout=3_000)
-                    loc.click()
-                    break
-                except PlaywrightTimeoutError:
-                    continue
+        _snap()
 
-            # Click the Continue/Send button to dispatch the code
-            try:
-                page.locator(
-                    "button:has-text('Continue'), button:has-text('Send'), "
-                    "button[type='submit'], input[type='submit']"
-                ).first.click(timeout=8_000)
-                try:
-                    page.wait_for_load_state("load", timeout=10_000)
-                except PlaywrightTimeoutError:
-                    pass
-                page.wait_for_timeout(1_500)
-            except PlaywrightTimeoutError:
-                pass
+        # Check "Skip this step in future if this is your private device"
+        # so that subsequent setups don't require OTP
+        try:
+            cb = page.locator("input[type='checkbox']").first
+            cb.wait_for(state="visible", timeout=3_000)
+            if not cb.is_checked():
+                cb.check()
+        except PlaywrightTimeoutError:
+            pass
 
-        # ── Code entry step (#/rba/challenge or similar) ───────────────────────
-        # Covers both traditional MFA and RBA challenge pages.
-        if "onehealthcareid.com" in page.url and "uhcjarvis.com" not in page.url:
-            mfa_selectors = [
-                "input[type='text']",
-                "input[name='otp']",
-                "input[name='code']",
-                "input[name='verificationCode']",
-                "input[placeholder*='code' i]",
-                "input[aria-label*='code' i]",
-                "input[maxlength='6']",
-                "input[maxlength='8']",
-            ]
-            mfa_field = None
-            for sel in mfa_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    loc.wait_for(state="visible", timeout=5_000)
-                    mfa_field = loc
-                    break
-                except PlaywrightTimeoutError:
-                    continue
+        # Wait for user to supply the OTP via /setup/mfa
+        otp = mfa_fn()
+        page.locator("input:visible").first.fill(str(otp))
+        page.locator("button:has-text('Continue')").first.click(timeout=10_000)
+        _wait_load(page, timeout=20_000)
 
-            if mfa_field:
-                code = mfa_fn()  # blocks until user submits via /setup/mfa
-                mfa_field.fill(str(code))
-                page.locator(
-                    "button:has-text('Continue'), button:has-text('Verify'), "
-                    "button:has-text('Submit'), button[type='submit']"
-                ).first.click(timeout=10_000)
-                # Use load not networkidle — some pages poll indefinitely
-                try:
-                    page.wait_for_load_state("load", timeout=15_000)
-                except PlaywrightTimeoutError:
-                    pass
-                page.wait_for_timeout(2_000)
-
-        # ── Handle "Trust this device?" / "Keep me signed in?" prompts ────────
-        trust_selectors = [
-            "button:has-text('Trust')",
-            "button:has-text('Yes, trust')",
-            "button:has-text('Keep me signed in')",
-            "button:has-text('Remember this device')",
-            "button:has-text('Yes')",
-        ]
-        for sel in trust_selectors:
-            try:
-                loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=3_000)
-                loc.click()
-                page.wait_for_timeout(2_000)
-                break
-            except PlaywrightTimeoutError:
-                continue
-
-        # ── Confirm we're back on Jarvis ───────────────────────────────────────
+        # ── 6. Should now be on Jarvis ─────────────────────────────────────────
         try:
             page.wait_for_url("*uhcjarvis.com*", timeout=20_000)
         except PlaywrightTimeoutError:
             pass
 
+        _snap()
+
         if "onehealthcareid.com" in page.url:
             context.close()
             browser.close()
             raise RuntimeError(
-                f"Still on SSO after verification ({page.url}). "
-                "Visit /setup/screenshot to see what the browser is stuck on."
+                f"Still on SSO after entering OTP ({page.url}). "
+                "Visit /setup/debug for a screenshot of what the browser sees."
             )
 
         context.storage_state(path=str(SESSION_FILE))
         b64 = base64.b64encode(SESSION_FILE.read_bytes()).decode()
-
-        # Make the session available to run_export() immediately without a redeploy
         os.environ["JARVIS_SESSION_B64"] = b64
 
         context.close()

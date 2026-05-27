@@ -116,6 +116,15 @@ def setup_status():
     return jsonify(_setup)
 
 
+@app.route("/setup/debug")
+def setup_debug():
+    """Return the most recent screenshot captured during a setup run."""
+    import jarvis_export as je
+    if not je.debug_screenshot:
+        return "No debug screenshot available yet. Run /setup first.", 404
+    return Response(je.debug_screenshot, mimetype="image/png")
+
+
 @app.route("/setup/screenshot")
 def setup_screenshot():
     """Navigate to the SSO login page and return a screenshot for debugging."""
