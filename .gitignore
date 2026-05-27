@@ -1,0 +1,7 @@
+.env
+jarvis_session.json
+downloads/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
