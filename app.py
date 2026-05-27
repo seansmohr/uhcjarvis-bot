@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 
 from flask import Response
 from jarvis_export import (
-    SessionExpiredError, SSO_URL,
+    SessionExpiredError, JARVIS_SIGNIN_URL,
     _stealth_browser, _stealth_context,
     run_export, setup_session,
 )
@@ -123,8 +123,15 @@ def setup_screenshot():
         browser = _stealth_browser(p)
         context = _stealth_context(browser)
         page = context.new_page()
-        page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
+        page.goto(JARVIS_SIGNIN_URL, wait_until="networkidle", timeout=30_000)
+        page.wait_for_timeout(2_000)
         try:
+            page.locator(
+                "button:has-text('Sign in with One Healthcare ID'), "
+                "a:has-text('Sign in with One Healthcare ID')"
+            ).first.click(timeout=8_000)
+            page.wait_for_url("*onehealthcareid.com*", timeout=15_000)
+            page.wait_for_load_state("networkidle", timeout=10_000)
             page.wait_for_selector("input", state="visible", timeout=10_000)
         except Exception:
             pass

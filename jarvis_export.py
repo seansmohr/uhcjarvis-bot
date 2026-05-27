@@ -16,6 +16,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 LOGIN_URL = "https://www.uhcjarvis.com"
+JARVIS_SIGNIN_URL = "https://www.uhcjarvis.com/content/jarvis/en/sign_in.html"
 SSO_URL = "https://identity.onehealthcareid.com/oneapp/index.html"
 SESSION_FILE = Path("/tmp/jarvis_session.json")
 DOWNLOAD_DIR = Path("/tmp/jarvis_downloads")
@@ -236,7 +237,32 @@ def setup_session(mfa_fn) -> str:
         context = _stealth_context(browser)
         page = context.new_page()
 
-        page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
+        # Step 1: load the Jarvis sign-in page
+        page.goto(JARVIS_SIGNIN_URL, wait_until="networkidle", timeout=30_000)
+        page.wait_for_timeout(2_000)
+
+        # Step 2: click "Sign in with One Healthcare ID" — this initialises the
+        #         OAuth flow and redirects to the SSO page with proper state tokens
+        try:
+            page.locator(
+                "button:has-text('Sign in with One Healthcare ID'), "
+                "a:has-text('Sign in with One Healthcare ID')"
+            ).first.click(timeout=10_000)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                "Could not find the 'Sign in with One Healthcare ID' button on "
+                f"{JARVIS_SIGNIN_URL}. The page layout may have changed."
+            )
+
+        # Step 3: wait for redirect to SSO domain
+        try:
+            page.wait_for_url("*onehealthcareid.com*", timeout=15_000)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"Did not redirect to OneHealthcareID after clicking sign-in. "
+                f"Currently at: {page.url}"
+            )
+        page.wait_for_load_state("networkidle", timeout=15_000)
         landed_url = page.url
 
         # Wait up to 15s for ANY input to appear — SPA may render slowly
