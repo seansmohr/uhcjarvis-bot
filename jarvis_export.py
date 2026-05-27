@@ -237,9 +237,22 @@ def setup_session(mfa_fn) -> str:
         page = context.new_page()
 
         page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
-        # Extra wait for SPA to fully render after networkidle
-        page.wait_for_timeout(3_000)
         landed_url = page.url
+
+        # Wait up to 15s for ANY input to appear — SPA may render slowly
+        try:
+            page.wait_for_selector("input", state="visible", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+
+        # Collect all visible inputs for debugging
+        visible_inputs = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('input')).map(el => ({
+                name: el.name, id: el.id, type: el.type,
+                placeholder: el.placeholder, autocomplete: el.autocomplete,
+                visible: el.offsetParent !== null
+            }));
+        }""")
 
         username_selectors = [
             "input[name='username']",
@@ -262,7 +275,7 @@ def setup_session(mfa_fn) -> str:
         for sel in username_selectors:
             try:
                 loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=3_000)
+                loc.wait_for(state="visible", timeout=2_000)
                 username_field = loc
                 break
             except PlaywrightTimeoutError:
@@ -273,8 +286,8 @@ def setup_session(mfa_fn) -> str:
             browser.close()
             raise RuntimeError(
                 f"Could not find the username field. "
-                f"Login page landed at: {landed_url} — "
-                f"please share this URL so we can add the correct selectors."
+                f"URL: {landed_url} | "
+                f"Inputs found on page: {visible_inputs}"
             )
 
         username_field.fill(username)

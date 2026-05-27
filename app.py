@@ -5,7 +5,12 @@ import threading
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from jarvis_export import SessionExpiredError, run_export, setup_session
+from flask import Response
+from jarvis_export import (
+    SessionExpiredError, SSO_URL,
+    _stealth_browser, _stealth_context,
+    run_export, setup_session,
+)
 
 load_dotenv()
 
@@ -108,6 +113,25 @@ def setup_mfa():
 @app.route("/setup/status")
 def setup_status():
     return jsonify(_setup)
+
+
+@app.route("/setup/screenshot")
+def setup_screenshot():
+    """Navigate to the SSO login page and return a screenshot for debugging."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = _stealth_browser(p)
+        context = _stealth_context(browser)
+        page = context.new_page()
+        page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
+        try:
+            page.wait_for_selector("input", state="visible", timeout=10_000)
+        except Exception:
+            pass
+        img = page.screenshot(full_page=True)
+        context.close()
+        browser.close()
+    return Response(img, mimetype="image/png")
 
 
 # ── Setup page HTML ───────────────────────────────────────────────────────────
