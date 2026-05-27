@@ -16,6 +16,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 LOGIN_URL = "https://www.uhcjarvis.com"
+SSO_URL = "https://identity.onehealthcareid.com/oneapp/index.html"
 SESSION_FILE = Path("/tmp/jarvis_session.json")
 DOWNLOAD_DIR = Path("/tmp/jarvis_downloads")
 
@@ -209,25 +210,100 @@ def setup_session(mfa_fn) -> str:
         context = browser.new_context()
         page = context.new_page()
 
-        page.goto(LOGIN_URL, wait_until="networkidle", timeout=30_000)
+        page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
+        # Extra wait for SPA to fully render after networkidle
+        page.wait_for_timeout(3_000)
+        landed_url = page.url
 
-        try:
-            page.locator(
-                "input[name='username'], input[type='email'], #username"
-            ).first.fill(username, timeout=10_000)
-        except PlaywrightTimeoutError:
-            raise RuntimeError("Could not find the username field. Jarvis UI may have changed.")
+        username_selectors = [
+            "input[name='username']",
+            "input[name='Username']",
+            "input[type='email']",
+            "input[name='email']",
+            "input[name='userId']",
+            "input[name='user']",
+            "input[name='loginId']",
+            "input[name='identifier']",
+            "input[id='username']",
+            "input[id='email']",
+            "input[id='userId']",
+            "input[id='user']",
+            "input[id='okta-signin-username']",
+            "input[autocomplete='username']",
+            "input[autocomplete='email']",
+        ]
+        username_field = None
+        for sel in username_selectors:
+            try:
+                loc = page.locator(sel).first
+                loc.wait_for(state="visible", timeout=3_000)
+                username_field = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
 
-        try:
-            page.locator(
-                "input[name='password'], input[type='password'], #password"
-            ).first.fill(password, timeout=10_000)
-        except PlaywrightTimeoutError:
-            raise RuntimeError("Could not find the password field.")
+        if not username_field:
+            context.close()
+            browser.close()
+            raise RuntimeError(
+                f"Could not find the username field. "
+                f"Login page landed at: {landed_url} — "
+                f"please share this URL so we can add the correct selectors."
+            )
+
+        username_field.fill(username)
+
+        password_selectors = [
+            "input[name='password']",
+            "input[name='Password']",
+            "input[type='password']",
+            "input[id='password']",
+            "input[id='okta-signin-password']",
+            "input[autocomplete='current-password']",
+        ]
+        password_field = None
+        for sel in password_selectors:
+            try:
+                loc = page.locator(sel).first
+                loc.wait_for(state="visible", timeout=3_000)
+                password_field = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if not password_field:
+            # Some SSO flows show password on a second screen after username submit
+            try:
+                page.locator(
+                    "button[type='submit'], input[type='submit'], "
+                    "button:has-text('Next'), button:has-text('Continue')"
+                ).first.click(timeout=5_000)
+                page.wait_for_timeout(2_000)
+            except PlaywrightTimeoutError:
+                pass
+            for sel in password_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    loc.wait_for(state="visible", timeout=3_000)
+                    password_field = loc
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+
+        if not password_field:
+            context.close()
+            browser.close()
+            raise RuntimeError(
+                f"Could not find the password field. "
+                f"Currently at: {page.url}"
+            )
+
+        password_field.fill(password)
 
         page.locator(
             "button[type='submit'], input[type='submit'], "
-            "button:has-text('Sign In'), button:has-text('Log In')"
+            "button:has-text('Sign In'), button:has-text('Log In'), "
+            "button:has-text('Next'), button:has-text('Continue')"
         ).first.click(timeout=10_000)
         page.wait_for_load_state("networkidle", timeout=20_000)
 
@@ -258,10 +334,20 @@ def setup_session(mfa_fn) -> str:
             ).first.click(timeout=10_000)
             page.wait_for_load_state("networkidle", timeout=20_000)
 
-        if not _is_logged_in(page):
+        # After SSO login, expect a redirect back to uhcjarvis.com
+        # Wait up to 15s for the redirect to complete
+        try:
+            page.wait_for_url("*uhcjarvis.com*", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+
+        if "onehealthcareid.com" in page.url:
             context.close()
             browser.close()
-            raise RuntimeError("Login failed — check JARVIS_USERNAME and JARVIS_PASSWORD.")
+            raise RuntimeError(
+                f"Login failed — still on SSO page ({page.url}). "
+                "Check JARVIS_USERNAME and JARVIS_PASSWORD in Railway variables."
+            )
 
         context.storage_state(path=str(SESSION_FILE))
         b64 = base64.b64encode(SESSION_FILE.read_bytes()).decode()
