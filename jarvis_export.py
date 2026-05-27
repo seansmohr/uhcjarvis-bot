@@ -254,121 +254,53 @@ def setup_session(mfa_fn) -> str:
                 f"{JARVIS_SIGNIN_URL}. The page layout may have changed."
             )
 
-        # Step 3: wait for redirect to SSO domain
+        # Step 3: wait to land on the SSO page (redirect may take a moment)
         try:
-            page.wait_for_url("*onehealthcareid.com*", timeout=15_000)
+            page.wait_for_url("*onehealthcareid.com*", timeout=20_000)
         except PlaywrightTimeoutError:
+            pass  # already there — wait_for_url can fire late on SPA hash routes
+
+        if "onehealthcareid.com" not in page.url:
             raise RuntimeError(
-                f"Did not redirect to OneHealthcareID after clicking sign-in. "
+                f"Did not reach OneHealthcareID after clicking sign-in. "
                 f"Currently at: {page.url}"
             )
-        page.wait_for_load_state("networkidle", timeout=15_000)
-        landed_url = page.url
 
-        # Wait up to 15s for ANY input to appear — SPA may render slowly
+        page.wait_for_load_state("networkidle", timeout=15_000)
+
+        # ── Username step ──────────────────────────────────────────────────────
+        # OneHealthcareID uses a two-step flow:
+        #   1. Enter username / email → click Continue
+        #   2. Enter password → click Continue
         try:
             page.wait_for_selector("input", state="visible", timeout=15_000)
         except PlaywrightTimeoutError:
-            pass
-
-        # Collect all visible inputs for debugging
-        visible_inputs = page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('input')).map(el => ({
-                name: el.name, id: el.id, type: el.type,
-                placeholder: el.placeholder, autocomplete: el.autocomplete,
-                visible: el.offsetParent !== null
-            }));
-        }""")
-
-        username_selectors = [
-            "input[name='username']",
-            "input[name='Username']",
-            "input[type='email']",
-            "input[name='email']",
-            "input[name='userId']",
-            "input[name='user']",
-            "input[name='loginId']",
-            "input[name='identifier']",
-            "input[id='username']",
-            "input[id='email']",
-            "input[id='userId']",
-            "input[id='user']",
-            "input[id='okta-signin-username']",
-            "input[autocomplete='username']",
-            "input[autocomplete='email']",
-        ]
-        username_field = None
-        for sel in username_selectors:
-            try:
-                loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=2_000)
-                username_field = loc
-                break
-            except PlaywrightTimeoutError:
-                continue
-
-        if not username_field:
-            context.close()
-            browser.close()
             raise RuntimeError(
-                f"Could not find the username field. "
-                f"URL: {landed_url} | "
-                f"Inputs found on page: {visible_inputs}"
+                f"SSO page loaded but no input fields appeared. URL: {page.url}"
             )
 
+        # Fill the first visible text input (the "One Healthcare ID or Email Address" field)
+        username_field = page.locator("input:visible").first
         username_field.fill(username)
 
-        password_selectors = [
-            "input[name='password']",
-            "input[name='Password']",
-            "input[type='password']",
-            "input[id='password']",
-            "input[id='okta-signin-password']",
-            "input[autocomplete='current-password']",
-        ]
-        password_field = None
-        for sel in password_selectors:
-            try:
-                loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=3_000)
-                password_field = loc
-                break
-            except PlaywrightTimeoutError:
-                continue
+        page.locator(
+            "button:has-text('Continue'), button[type='submit'], input[type='submit']"
+        ).first.click(timeout=10_000)
+        page.wait_for_load_state("networkidle", timeout=15_000)
+        page.wait_for_timeout(1_500)
 
-        if not password_field:
-            # Some SSO flows show password on a second screen after username submit
-            try:
-                page.locator(
-                    "button[type='submit'], input[type='submit'], "
-                    "button:has-text('Next'), button:has-text('Continue')"
-                ).first.click(timeout=5_000)
-                page.wait_for_timeout(2_000)
-            except PlaywrightTimeoutError:
-                pass
-            for sel in password_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    loc.wait_for(state="visible", timeout=3_000)
-                    password_field = loc
-                    break
-                except PlaywrightTimeoutError:
-                    continue
-
-        if not password_field:
-            context.close()
-            browser.close()
+        # ── Password step ──────────────────────────────────────────────────────
+        try:
+            page.wait_for_selector("input[type='password']", state="visible", timeout=10_000)
+        except PlaywrightTimeoutError:
             raise RuntimeError(
-                f"Could not find the password field. "
-                f"Currently at: {page.url}"
+                f"Password field did not appear after submitting username. URL: {page.url}"
             )
 
-        password_field.fill(password)
+        page.locator("input[type='password']").first.fill(password)
 
         page.locator(
-            "button[type='submit'], input[type='submit'], "
-            "button:has-text('Sign In'), button:has-text('Log In'), "
-            "button:has-text('Next'), button:has-text('Continue')"
+            "button:has-text('Continue'), button[type='submit'], input[type='submit']"
         ).first.click(timeout=10_000)
         page.wait_for_load_state("networkidle", timeout=20_000)
 
