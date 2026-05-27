@@ -20,6 +20,35 @@ SSO_URL = "https://identity.onehealthcareid.com/oneapp/index.html"
 SESSION_FILE = Path("/tmp/jarvis_session.json")
 DOWNLOAD_DIR = Path("/tmp/jarvis_downloads")
 
+# Mimic a real Mac Chrome to avoid bot-detection on the SSO page
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_STEALTH_SCRIPT = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+
+
+def _stealth_context(browser, **kwargs):
+    """Return a new context with bot-detection mitigations applied."""
+    ctx = browser.new_context(
+        user_agent=_USER_AGENT,
+        viewport={"width": 1280, "height": 800},
+        locale="en-US",
+        **kwargs,
+    )
+    ctx.add_init_script(_STEALTH_SCRIPT)
+    return ctx
+
+
+def _stealth_browser(playwright):
+    """Launch Chromium with automation flags removed."""
+    return playwright.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled"],
+        ignore_default_args=["--enable-automation"],
+    )
+
 
 class SessionExpiredError(Exception):
     pass
@@ -135,11 +164,8 @@ def run_export() -> str:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            storage_state=str(SESSION_FILE),
-            accept_downloads=True,
-        )
+        browser = _stealth_browser(p)
+        context = _stealth_context(browser, storage_state=str(SESSION_FILE), accept_downloads=True)
         page = context.new_page()
 
         page.goto(LOGIN_URL, wait_until="networkidle", timeout=30_000)
@@ -206,8 +232,8 @@ def setup_session(mfa_fn) -> str:
         raise RuntimeError("JARVIS_USERNAME and JARVIS_PASSWORD must be set in Railway variables.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = _stealth_browser(p)
+        context = _stealth_context(browser)
         page = context.new_page()
 
         page.goto(SSO_URL, wait_until="networkidle", timeout=30_000)
