@@ -324,21 +324,29 @@ def setup_session(mfa_fn) -> str:
             _snap()
             raise RuntimeError(f"SSO loaded but no input appeared. URL: {page.url}")
 
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(1_000)
         _snap()
-        page.locator("input:visible").first.fill(username)
+
+        # Use click + press_sequentially so Angular registers each keystroke
+        username_input = page.locator("input:visible").first
+        username_input.click()
+        username_input.press_sequentially(username, delay=50)
+        page.wait_for_timeout(500)
         page.locator("button:has-text('Continue')").first.click(timeout=10_000)
-        _wait_load(page)
 
         # ── 3. SSO page: password ──────────────────────────────────────────────
+        # Password appears on the same #/login URL — wait up to 20s for it
         try:
-            page.wait_for_selector("input[type='password']", state="visible", timeout=15_000)
+            page.wait_for_selector("input[type='password']", state="visible", timeout=20_000)
         except PlaywrightTimeoutError:
             _snap()
             raise RuntimeError(f"Password field did not appear. URL: {page.url}")
 
         _snap()
-        page.locator("input[type='password']").first.fill(password)
+        password_input = page.locator("input[type='password']").first
+        password_input.click()
+        password_input.press_sequentially(password, delay=50)
+        page.wait_for_timeout(500)
         page.locator("button:has-text('Continue')").first.click(timeout=10_000)
         _wait_load(page)
 
